@@ -9,7 +9,7 @@ on:
 jobs:
   build:
     name: Build rootless debs
-    runs-on: macos-14
+    runs-on: macos-latest
 
     steps:
       - name: Checkout
@@ -23,26 +23,28 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install ldid cocoapods
+          brew install ldid
           git clone --quiet --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
 
       - name: Apply tag version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          sed -i '' "s/^Version:.*/Version: ${VERSION}/" libsmserver/control package/DEBIAN/control
+          sed -i '' "s/^Version:.*/Version: ${VERSION}/" libsmserver/control
           echo "event=version_applied version=${VERSION}"
 
-      - name: Build
+      - name: Build tweak
         run: |
           export THEOS="$HOME/theos"
-          ./package/build-rootless.sh
+          /usr/bin/make -C libsmserver clean >/dev/null
+          /usr/bin/make -C libsmserver package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          ls -l libsmserver/packages/
 
       - name: Upload debs
         uses: actions/upload-artifact@v4
         with:
           name: smserver-rootless-debs
-          path: package/out/*.deb
+          path: libsmserver/packages/*.deb
 
   release:
     name: Create release
