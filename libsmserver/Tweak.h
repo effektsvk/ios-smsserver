@@ -82,6 +82,7 @@
 - (IMAccount *)account;
 - (id)lastSentMessage;
 - (void)setLocalUserIsTyping:(BOOL)arg1;
+- (NSString *)localUserIsComposing;
 - (NSString *)lastAddressedHandleID;
 - (void)setLastAddressedHandleID:(NSString *)arg1;
 - (NSString *)lastAddressedSIMID;

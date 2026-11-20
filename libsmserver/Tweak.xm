@@ -317,6 +317,17 @@ static BOOL SMSChatIsGroup(IMChat *chat) {
 	return [identifier hasPrefix:@"chat"] && ![identifier containsString:@"@"];
 }
 
+// On iOS 16 IMCore only sends typing indicators for 1:1 chats (chatStyle 45,
+// per -[IMChat _chatStyleSupportsTypingAndCancelTypingIndicators]); Apple
+// added group typing in iOS 26. Groups and SMS chats can never carry typing.
+static BOOL SMSChatSupportsTypingIndicator(IMChat *chat) {
+	SEL supports = sel_registerName("_chatStyleSupportsTypingAndCancelTypingIndicators");
+	if ([chat respondsToSelector:supports]) return ((BOOL (*)(id, SEL))objc_msgSend)(chat, supports);
+	if ([chat respondsToSelector:@selector(chatStyle)]) return (long)[chat chatStyle] == 45;
+	return NO;
+}
+
+
 static NSString *SMSChatSenderAddress(IMChat *chat) {
 	if (!chat) return nil;
 	IMAccount *account = [chat respondsToSelector:@selector(account)] ? [chat account] : nil;
@@ -922,11 +933,47 @@ static NSString *SMSSentFromAddress(IMChat *chat, IMMessage *message) {
 	BOOL typing = [vals isKindOfClass:[NSDictionary class]] && [vals[@"typing"] boolValue];
 	if (!chatId.length) return @NO;
 	if (!SMSEnsureDaemonConnected(3.0)) return @NO;
+	// IMChatRegistry silently drops a typing message when the chat's account
+	// service is not iMessage ("Bailing sending message as its a typing
+	// message and service is not iMessage"). Send text refreshes the service
+	// first; typing must too.
+	if (typing) [self refreshServiceForAddress:chatId timeout:SMSServiceRefreshTimeout];
 	NSNumber *result = SMSRunOnMain(@"send_typing", ^id{
 		IMChat *chat = SMSChatForAddress(chatId, NO, nil);
-		if (!chat || ![chat respondsToSelector:@selector(setLocalUserIsTyping:)]) return @NO;
+		NSString *source = @"existing";
+		// For a phone-number DM the registry can hold an SMS-bound chat row;
+		// prefer its iMessage sibling, the only one that can carry typing.
+		if (chat && ![SMSAccountService([chat respondsToSelector:@selector(account)] ? [chat account] : nil) isEqualToString:@"iMessage"]) {
+			IMChat *imessageChat = SMSExistingIMessageChat(chatId);
+			if (imessageChat) {
+				chat = imessageChat;
+				source = @"imessage_guid";
+			}
+		}
+		if (!chat || ![chat respondsToSelector:@selector(setLocalUserIsTyping:)]) {
+			SMSLog(@"event=typing_failed reason=no_chat");
+			return @NO;
+		}
+		NSString *service = SMSAccountService([chat respondsToSelector:@selector(account)] ? [chat account] : nil);
+		long style = [chat respondsToSelector:@selector(chatStyle)] ? (long)[chat chatStyle] : -1;
+		BOOL supported = SMSChatSupportsTypingIndicator(chat);
+		SMSLog(@"event=typing_state source=%@ service=%@ style=%ld supported=%d", source, service, style, supported);
+		if (typing && !supported) {
+			SMSLog(@"event=typing_failed reason=style_unsupported style=%ld service=%@", style, service);
+			return @NO;
+		}
+		if (typing) {
+			// A repeated YES while already composing only refreshes a
+			// timestamp inside IMCore and transmits nothing, so re-arm the
+			// indicator with a stop -> start pair before sending.
+			NSString *composing = [chat respondsToSelector:@selector(localUserIsComposing)] ? [chat localUserIsComposing] : nil;
+			if (composing.length) {
+				[chat setLocalUserIsTyping:NO];
+				SMSLog(@"event=typing_rearmed previous=%@", composing);
+			}
+		}
 		[chat setLocalUserIsTyping:typing];
-		SMSLog(@"event=typing_sent typing=%d", typing);
+		SMSLog(@"event=typing_sent typing=%d service=%@ style=%ld", typing, service, style);
 		return @YES;
 	});
 	return result ?: @NO;
